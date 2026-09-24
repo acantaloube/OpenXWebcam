@@ -39,6 +39,8 @@ public final class PTPSession {
     private let transport: PTPUSBTransport
     private var transactionID: UInt32 = 0
     private let readTimeout: TimeInterval = 5
+    /// How many stale containers to discard before giving up on resynchronising.
+    private let maxStaleContainers = 8
 
     public init(transport: PTPUSBTransport) {
         self.transport = transport
@@ -78,7 +80,7 @@ public final class PTPSession {
             try write(dataContainer)
         }
 
-        var first = try read(timeout)
+        var first = try readContainer(timeout)
         guard let header = PTPContainerHeader(first) else {
             throw PTPSessionError.malformedResponse
         }
@@ -97,7 +99,7 @@ public final class PTPSession {
             if acc.count > declared {
                 first = acc.subdata(in: (acc.startIndex + declared)..<acc.endIndex)
             } else {
-                first = try read(timeout)
+                first = try readContainer(timeout)
             }
         }
 
@@ -150,6 +152,27 @@ public final class PTPSession {
 
     private func read(_ timeout: TimeInterval? = nil) throws -> Data {
         try transport.read(withTimeout: timeout ?? readTimeout)
+    }
+
+    /// Reads the next container that belongs to the current transaction.
+    ///
+    /// A command whose read timed out can still have its response delivered
+    /// afterwards. If that late container is taken as the answer to the *next*
+    /// command, every transaction from then on is off by one and the session never
+    /// recovers - the camera appears to hang and only a battery pull clears it.
+    /// PTP stamps every container with the transaction it belongs to, so a stale
+    /// one can simply be dropped and the next read tried instead.
+    private func readContainer(_ timeout: TimeInterval?) throws -> Data {
+        for _ in 0..<maxStaleContainers {
+            let data = try read(timeout)
+            guard let header = PTPContainerHeader(data) else { return data }
+            if header.transactionID == transactionID || header.transactionID == 0 {
+                return data
+            }
+            EngineLog.add(String(format: "discarded stale container for transaction %u (current %u)",
+                                 header.transactionID, transactionID))
+        }
+        throw PTPSessionError.malformedResponse
     }
 
     /// Absorbs a response that arrived after its command timed out.
