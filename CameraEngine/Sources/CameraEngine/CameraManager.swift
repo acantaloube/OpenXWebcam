@@ -34,6 +34,11 @@ public final class CameraManager {
     private let stopStreamFlag = OSAllocatedUnfairLock(initialState: false)
     private let latestDeviceInfo = OSAllocatedUnfairLock<PTPDeviceInfo?>(initialState: nil)
     private let pendingWrites = OSAllocatedUnfairLock<[PropertyWrite]>(initialState: [])
+    /// When the current session started delivering frames.
+    private let streamingSince = OSAllocatedUnfairLock<Date?>(initialState: nil)
+    /// A session that streamed at least this long before failing counts as healthy,
+    /// and refills the retry budget rather than drawing it down.
+    private static let healthySessionDuration: TimeInterval = 30
 
     private struct PropertyWrite: Sendable {
         let code: UInt16
@@ -139,7 +144,9 @@ public final class CameraManager {
     private func streamLoop(info: PTPUSBInterfaceInfo) {
         let size = liveViewSize
         let quality = liveViewQuality
-        var retry = RetryPolicy()
+        // Waits of 1, 2, 4, 4, 4 seconds: a camera that has just been cancelled out of
+        // a stuck transfer needs a moment before it takes new commands.
+        var retry = RetryPolicy(maxAttempts: 5, baseDelay: 1.0, maxDelay: 4.0)
         var lastError: String?
 
         while !streamStopRequested {
@@ -150,6 +157,12 @@ public final class CameraManager {
             } catch {
                 lastError = describe(error)
                 EngineLog.add("stream error: \(lastError ?? "")")
+                // Glitches minutes apart are not a failing camera. Without this, five of
+                // them spread over an afternoon ended the stream for good.
+                if let since = streamingSince.withLock({ $0 }),
+                   -since.timeIntervalSinceNow >= Self.healthySessionDuration {
+                    retry.reset()
+                }
                 guard !streamStopRequested, let delay = retry.nextDelay() else { break }
                 CameraDiscovery.killPtpcamerad()
                 Thread.sleep(forTimeInterval: delay)
@@ -176,12 +189,27 @@ public final class CameraManager {
     }
 
     private func streamOnce(info: PTPUSBInterfaceInfo, size: FujiLiveViewSize, quality: FujiLiveViewQuality) throws {
+        streamingSince.withLock { $0 = nil }
         CameraDiscovery.killPtpcamerad()
         let transport = PTPUSBTransport(service: info.service)
         try transport.openSeizing()
         defer { transport.close() }
 
         let session = PTPSession(transport: transport)
+        // A previous session may have failed with the camera mid-transfer. Get it out
+        // of that before sending anything, or the first command simply times out.
+        session.clearPipe()
+        do {
+            try runSession(session, size: size, quality: quality)
+        } catch {
+            // Empty the pipe while the connection is still open, so nothing the camera
+            // was still sending is cut off by the close.
+            session.clearPipe()
+            throw error
+        }
+    }
+
+    private func runSession(_ session: PTPSession, size: FujiLiveViewSize, quality: FujiLiveViewQuality) throws {
         let rc = try session.open()
         guard rc == PTPRC.ok else {
             throw CameraManagerError.sessionOpenFailed(rc)
@@ -194,18 +222,26 @@ public final class CameraManager {
         try fuji.prepare(size: size, quality: quality)
         try fuji.startLiveView()
         setState(.streaming(model: model))
+        streamingSince.withLock { $0 = Date() }
         lockedProps = []
         publishProperties(from: fuji, advertised: advertised)
 
         var frames = 0
         var windowStart = Date()
         while !streamStopRequested {
-            applyPendingWrites(to: fuji, advertised: advertised)
-            guard let jpeg = try fuji.nextFrame() else {
+            // This is a bare Thread, so nothing drains its autorelease pool on its own:
+            // every object the transport and the frame consumer autorelease would live
+            // until the thread ends. Drain once per frame instead.
+            let delivered = try autoreleasepool { () throws -> Bool in
+                applyPendingWrites(to: fuji, advertised: advertised)
+                guard let jpeg = try fuji.nextFrame() else { return false }
+                onFrame?(jpeg)
+                return true
+            }
+            guard delivered else {
                 usleep(5000)
                 continue
             }
-            onFrame?(jpeg)
             frames += 1
             let elapsed = -windowStart.timeIntervalSinceNow
             if elapsed >= 2 {

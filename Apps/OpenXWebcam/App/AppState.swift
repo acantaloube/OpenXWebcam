@@ -5,6 +5,7 @@ import CameraEngine
 
 @MainActor
 final class AppState: ObservableObject {
+    private var signalSources: [DispatchSourceSignal] = []
     @Published var extensionStatus: ExtensionInstaller.Status = .unknown
     @Published var streamerState: CameraStreamer.State = .idle
     @Published var connectedCameraName: String?
@@ -110,7 +111,19 @@ final class AppState: ObservableObject {
         presence.start()
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
                                                object: nil, queue: .main) { [streamer] _ in
-            streamer.stopAndWait(timeout: 2)
+            // The stream thread can be inside a read of up to five seconds. Exiting
+            // before it finishes aborts that transfer, and an aborted transfer is
+            // what hangs the X-T3's USB firmware until its battery is pulled.
+            streamer.stopAndWait(timeout: 6)
+        }
+        // A termination signal (logout, a script, `kill`) would otherwise end the
+        // process on the spot, mid-transfer. Route it through the normal quit path.
+        for sig in [SIGTERM, SIGINT, SIGHUP] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { NSApplication.shared.terminate(nil) }
+            source.resume()
+            signalSources.append(source)
         }
         DispatchQueue.main.async { [installer] in
             installer.install()

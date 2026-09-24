@@ -92,6 +92,12 @@ public final class FujiCamera {
     /// keeps the setting working on bodies that do answer, without stalling the ones
     /// that don't.
     private func writeLiveViewQuality(_ quality: FujiLiveViewQuality) {
+        // Reads are acknowledged normally; this write isn't. Every unacknowledged
+        // write leaves a late reply in the pipe, so don't send one on every reconnect
+        // when the camera already has the value.
+        if (try? session.getPropU16(FujiProp.liveViewQuality))?.value == quality.rawValue {
+            return
+        }
         do {
             let rc = try session.setPropU16(FujiProp.liveViewQuality, quality.rawValue,
                                             timeout: Self.propertyAckTimeout)
