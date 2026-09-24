@@ -23,6 +23,9 @@ public final class CameraManager {
     public var onAutofocusResult: ((Bool) -> Void)?
     /// Reports the auto exposure lock state after a change. Called on the main queue.
     public var onExposureLockChanged: ((Bool) -> Void)?
+    /// Reports the body battery in percent, on connect and then every 30 seconds.
+    /// Called on the main queue.
+    public var onBattery: ((Int) -> Void)?
 
     public private(set) var liveViewSize: FujiLiveViewSize
     public private(set) var liveViewQuality: FujiLiveViewQuality
@@ -45,6 +48,9 @@ public final class CameraManager {
     /// A session that streamed at least this long before failing counts as healthy,
     /// and refills the retry budget rather than drawing it down.
     private static let healthySessionDuration: TimeInterval = 30
+    /// How often to read the battery. It changes slowly, and each read is one more
+    /// transaction sharing the session with the frame loop.
+    private static let batteryPollInterval: TimeInterval = 30
 
     private struct PropertyWrite: Sendable {
         let code: UInt16
@@ -299,6 +305,8 @@ public final class CameraManager {
         var windowStart = Date()
         autofocusRequested.withLock { $0 = false }
         exposureLockRequest.withLock { $0 = nil }
+        var nextBatteryRead = Date()
+        var lastBattery: Int? = nil
         while !streamStopRequested {
             // This is a bare Thread, so nothing drains its autorelease pool on its own:
             // every object the transport and the frame consumer autorelease would live
@@ -318,6 +326,16 @@ public final class CameraManager {
                 }) {
                     let locked = fuji.setAutoExposureLock(wanted)
                     DispatchQueue.main.async { [onExposureLockChanged] in onExposureLockChanged?(locked) }
+                }
+                if Date() >= nextBatteryRead {
+                    nextBatteryRead = Date(timeIntervalSinceNow: Self.batteryPollInterval)
+                    if let level = fuji.batteryLevel() {
+                        if level != lastBattery {
+                            EngineLog.add("battery \(level)%")
+                            lastBattery = level
+                        }
+                        DispatchQueue.main.async { [onBattery] in onBattery?(level) }
+                    }
                 }
                 guard let jpeg = try fuji.nextFrame() else { return false }
                 onFrame?(jpeg)

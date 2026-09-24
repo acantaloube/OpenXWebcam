@@ -15,6 +15,8 @@ public enum FujiProp {
     public static let afStatus: UInt16 = 0xD209
     /// 1 = off, 2 = on. Only writable before live view starts.
     public static let faceDetection: UInt16 = 0xD020
+    /// Battery charge as a string, e.g. "49,0,0": body, then the two grip batteries.
+    public static let batteryInfo: UInt16 = 0xD36B
     /// Action codes written to `afTrigger` then latched with InitiateCapture.
     public enum Action {
         /// Autofocus: hold, poll afStatus, then release with `afRelease`.
@@ -293,6 +295,25 @@ public final class FujiCamera {
         let nowLocked = (state == 0)
         EngineLog.add("auto exposure \(nowLocked ? "locked" : "released") (state \(state.map(String.init) ?? "?"))")
         return nowLocked
+    }
+
+    /// Body battery charge in percent, or nil if the camera doesn't report it.
+    ///
+    /// Read from BatteryInfo2 (0xD36B), a string like "49,0,0": the body battery
+    /// first, then the two batteries of the optional vertical grip, 0 when absent.
+    /// The standard BatteryLevel (0x5001) is advertised by the X-T3 but not
+    /// implemented. Readable during live view without disturbing it.
+    public func batteryLevel() -> Int? {
+        guard let result = try? session.command(code: PTPOp.getDevicePropValue,
+                                                params: [UInt32(FujiProp.batteryInfo)]),
+              result.responseCode == PTPRC.ok, let data = result.data else { return nil }
+        var reader = PTPReader(data)
+        guard let text = reader.string(),
+              let first = text.split(separator: ",").first,
+              let level = Int(first.trimmingCharacters(in: .whitespaces)),
+              (0...100).contains(level)
+        else { return nil }
+        return level
     }
 
     public func stopLiveView() throws {

@@ -83,6 +83,22 @@ struct MenuView: View {
                     .frame(height: 96)
             }
         }
+        .overlay(alignment: .topLeading) {
+            if let level = state.batteryLevel {
+                Label {
+                    Text("\(level)%").monospacedDigit()
+                } icon: {
+                    Image(systemName: batterySymbol(level))
+                }
+                .font(.caption2)
+                .foregroundStyle(level <= 15 ? Color.red : Color.white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(.ultraThinMaterial, in: Capsule())
+                .padding(6)
+                .help("Camera battery")
+            }
+        }
         .overlay(alignment: .topTrailing) {
             if state.exposureLocked {
                 Text("AE-L")
@@ -168,6 +184,16 @@ struct MenuView: View {
             }
         }
         .transition(.opacity.combined(with: .scale(scale: 1.25)))
+    }
+
+    private func batterySymbol(_ level: Int) -> String {
+        switch level {
+        case ..<13: return "battery.0percent"
+        case ..<38: return "battery.25percent"
+        case ..<63: return "battery.50percent"
+        case ..<88: return "battery.75percent"
+        default: return "battery.100percent"
+        }
     }
 
     private func previewButton(_ symbol: String, active: Bool, action: @escaping () -> Void) -> some View {

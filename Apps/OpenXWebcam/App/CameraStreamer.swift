@@ -86,6 +86,11 @@ final class CameraStreamer {
         manager.requestAutofocus()
     }
 
+    var onBattery: ((Int) -> Void)? {
+        get { manager.onBattery }
+        set { manager.onBattery = newValue }
+    }
+
     var onExposureLockChanged: ((Bool) -> Void)? {
         get { manager.onExposureLockChanged }
         set { manager.onExposureLockChanged = newValue }

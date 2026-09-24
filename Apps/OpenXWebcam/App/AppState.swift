@@ -68,6 +68,7 @@ final class AppState: ObservableObject {
     @Published var releaseState: ReleaseState = .idle
     @Published var focusState: FocusState = .idle
     @Published var exposureLocked = false
+    @Published var batteryLevel: Int?
 
     enum FocusState: Equatable {
         case idle
@@ -105,6 +106,7 @@ final class AppState: ObservableObject {
                 self?.rememberCameraName(model)
             } else {
                 self?.previewImage = nil
+                self?.batteryLevel = nil
             }
         }
         streamer.onPropertiesChange = { [weak self] properties in
@@ -112,6 +114,9 @@ final class AppState: ObservableObject {
         }
         streamer.onPreviewFrame = { [weak self] image in
             self?.previewImage = image
+        }
+        streamer.onBattery = { [weak self] level in
+            self?.batteryLevel = level
         }
         streamer.onExposureLockChanged = { [weak self] locked in
             self?.exposureLocked = locked
