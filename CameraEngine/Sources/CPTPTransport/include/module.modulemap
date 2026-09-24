@@ -1,0 +1,5 @@
+module CPTPTransport {
+    header "PTPUSBTransport.h"
+    header "PTPUSBWatcher.h"
+    export *
+}

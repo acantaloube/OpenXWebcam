@@ -156,9 +156,9 @@ final class AppState: ObservableObject {
             source.resume()
             signalSources.append(source)
         }
-        DispatchQueue.main.async { [installer] in
-            installer.install()
-        }
+        // Local build: the camera extension is already installed and signed by
+        // upstream, so don't submit an activation request for one we don't bundle.
+        _ = installer
         if UserDefaults.standard.bool(forKey: "autoStart") {
             startStreaming()
         }

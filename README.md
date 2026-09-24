@@ -55,3 +55,68 @@ Have an unconfirmed body? Try it and open an issue with the output of
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+---
+
+## X-T3 fork
+
+This fork makes OpenXWebcam usable on the Fujifilm X-T3 and adds back the two
+buttons Fujifilm's own X Webcam had. The upstream-worthy changes are proposed
+in [#1](https://github.com/antonyshyn/OpenXWebcam/pull/1) (stability) and
+[#2](https://github.com/antonyshyn/OpenXWebcam/pull/2) (controls). Measured on an
+X-T3 (firmware 4.30), macOS 15.7.9: a 60 minute soak delivered 135,136 frames at
+37.5 fps with no freezes and flat memory.
+
+### What was wrong
+
+- **A memory leak** — every USB read leaked about 5 MB, taking the app past 3 GB
+  in half a minute until macOS killed it. Being killed mid-stream is what freezes
+  the camera. Affects every body.
+- **`DeleteObject` blocked.** It advances the live view buffer, so it can't be
+  skipped, but the X-T3 often never answers it. Now sent without waiting:
+  0.1 fps → ~37 fps.
+- **Empty packets and stray fragments** were read as responses and restarted the
+  stream about 24 times an hour.
+- **Late replies** were taken as the answer to the next command, putting the
+  session permanently off by one. Responses are now matched to their transaction.
+- **Stale captures and a retry budget that never refilled** turned small glitches
+  into a permanent error.
+
+### Restored controls
+
+- **Autofocus** — `0xD208 = 0x9300`, poll `AFStatus` (`0xD209`), release `0x0005`.
+- **AE lock** — `0xD208 = 0x9000`, release `0x0002`, state in `0xD212`.
+- **Face detection** enabled at stream start (`0xD020`), so autofocus aims at you.
+- **Release Camera** hands control back to the body after a crash.
+
+The code pairs come from traces of Fujifilm's X Webcam recorded in libgphoto2's
+ptp2 driver. `0xD173`, `0xD174` and `0xD020` work despite being absent from the
+X-T3's advertised property list.
+
+### If the camera freezes
+
+Its USB firmware has hung, and nothing on the Mac can reach it — no USB request,
+reset or re-enumeration brings it back. Switch the camera **off**, check that the
+back screen goes dark, wait five seconds, and switch it on. If the screen stays
+lit, the camera is holding itself on for USB: remove the battery instead.
+
+### Building without Xcode
+
+`build.sh` compiles the app with the Command Line Tools and produces an ad-hoc
+signed app. It builds the **app only** and drives the upstream-signed camera
+extension that the official release installs, so no Developer ID is needed.
+Install the official release first, then:
+
+    ./build.sh
+    open buildout/OpenXWebcam.app
+
+If `swiftc` fails with *redefinition of module 'SwiftBridging'*, your Command
+Line Tools install has a stale duplicate modulemap:
+
+    sudo mv /Library/Developer/CommandLineTools/usr/include/swift/module.modulemap \
+            /Library/Developer/CommandLineTools/usr/include/swift/module.modulemap.disabled
+
+`run-logged.sh` runs the app with its engine log kept on disk.
+`tools/soak.swift` is the long-running stability test: it streams through
+`CameraManager`, exercises autofocus and AE lock, and reports frame rate, stalls
+and every error. See the comment at the top of the file for how to build it.

@@ -8,6 +8,9 @@ public enum EngineLog {
 
     public static func add(_ message: String) {
         let line = "\(Date().formatted(stampFormat)) \(message)"
+        if ProcessInfo.processInfo.environment["OPENXWEBCAM_LOG"] != nil {
+            FileHandle.standardError.write(("[engine] " + line + "\n").data(using: .utf8)!)
+        }
         lines.withLock {
             $0.append(line)
             if $0.count > maxLines {
