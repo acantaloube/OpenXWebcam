@@ -66,7 +66,9 @@ public final class PTPSession {
         return response.readLE(at: 6)
     }
 
-    public func command(code: UInt16, params: [UInt32] = [], dataOut: Data? = nil) throws -> PTPCommandResult {
+    /// - Parameter timeout: overrides the default read timeout for this call only.
+    public func command(code: UInt16, params: [UInt32] = [], dataOut: Data? = nil,
+                        timeout: TimeInterval? = nil) throws -> PTPCommandResult {
         transactionID += 1
         let cmd = PTP.container(type: .command, code: code, transactionID: transactionID, params: params)
         try write(cmd)
@@ -76,7 +78,7 @@ public final class PTPSession {
             try write(dataContainer)
         }
 
-        var first = try read()
+        var first = try read(timeout)
         guard let header = PTPContainerHeader(first) else {
             throw PTPSessionError.malformedResponse
         }
@@ -86,7 +88,7 @@ public final class PTPSession {
             let declared = Int(header.length)
             var acc = first
             while acc.count < declared {
-                let more = try read()
+                let more = try read(timeout)
                 if more.isEmpty { break }
                 acc.append(more)
             }
@@ -95,7 +97,7 @@ public final class PTPSession {
             if acc.count > declared {
                 first = acc.subdata(in: (acc.startIndex + declared)..<acc.endIndex)
             } else {
-                first = try read()
+                first = try read(timeout)
             }
         }
 
@@ -128,14 +130,17 @@ public final class PTPSession {
         return (result.responseCode, data.readLE(at: 0))
     }
 
-    public func setPropU16(_ property: UInt16, _ value: UInt16) throws -> UInt16 {
+    public func setPropU16(_ property: UInt16, _ value: UInt16,
+                           timeout: TimeInterval? = nil) throws -> UInt16 {
         var payload = Data()
         payload.appendLE(value)
-        return try setProp(property, payload: payload)
+        return try setProp(property, payload: payload, timeout: timeout)
     }
 
-    public func setProp(_ property: UInt16, payload: Data) throws -> UInt16 {
-        let result = try command(code: PTPOp.setDevicePropValue, params: [UInt32(property)], dataOut: payload)
+    public func setProp(_ property: UInt16, payload: Data,
+                        timeout: TimeInterval? = nil) throws -> UInt16 {
+        let result = try command(code: PTPOp.setDevicePropValue, params: [UInt32(property)],
+                                 dataOut: payload, timeout: timeout)
         return result.responseCode
     }
 
@@ -143,7 +148,18 @@ public final class PTPSession {
         try transport.write(data)
     }
 
-    private func read() throws -> Data {
-        try transport.read(withTimeout: readTimeout)
+    private func read(_ timeout: TimeInterval? = nil) throws -> Data {
+        try transport.read(withTimeout: timeout ?? readTimeout)
+    }
+
+    /// Absorbs a response that arrived after its command timed out.
+    ///
+    /// Without this the stale container is picked up by the *next* command and
+    /// every transaction from then on is misaligned, which on some bodies wedges
+    /// the PTP function until the camera is power cycled.
+    public func drain(timeout: TimeInterval) {
+        while let data = try? transport.read(withTimeout: timeout), !data.isEmpty {
+            continue
+        }
     }
 }

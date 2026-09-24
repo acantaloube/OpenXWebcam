@@ -41,21 +41,66 @@ public final class FujiCamera {
     private let session: PTPSession
     private let busyRetries = 10
     private let busyRetryDelay: UInt32 = 300_000
+    /// How long to wait for the live view delete to be acknowledged before moving on.
+    private static let deleteAckTimeout: TimeInterval = 0.005
+    /// How long to spend absorbing a late delete response.
+    private static let deleteDrainTimeout: TimeInterval = 0.01
+    /// How long to wait for a live view property write to be acknowledged.
+    private static let propertyAckTimeout: TimeInterval = 0.005
+    /// How long to spend absorbing a late property-write response.
+    private static let propertyDrainTimeout: TimeInterval = 0.05
 
     public init(session: PTPSession) {
         self.session = session
     }
 
     public func prepare(size: FujiLiveViewSize? = nil, quality: FujiLiveViewQuality? = nil) throws {
+        clearStaleCapture()
         let rc = try setPropRetryingBusy(FujiProp.priorityMode, 2)
         guard rc == PTPRC.ok else {
             throw FujiCameraError.propertyWriteFailed(FujiProp.priorityMode, rc: rc)
         }
         if let size {
-            _ = try setPropRetryingBusy(FujiProp.liveViewSize, size.rawValue)
+            let rc = try setPropRetryingBusy(FujiProp.liveViewSize, size.rawValue)
+            if rc != PTPRC.ok {
+                EngineLog.add(String(format: "live view size write rc 0x%04X", rc))
+            }
         }
         if let quality {
-            _ = try setPropRetryingBusy(FujiProp.liveViewQuality, quality.rawValue)
+            writeLiveViewQuality(quality)
+        }
+    }
+
+    /// Clears a live view session left running by a previous client.
+    ///
+    /// If an earlier run exited without calling TerminateOpenCapture - a crash, a
+    /// SIGKILL, a yanked cable - the camera keeps the capture open and answers
+    /// DeviceBusy (0x2019) to every subsequent property write, so setup fails and
+    /// the app never recovers on its own. Tearing the old session down first costs
+    /// one round trip and makes startup idempotent.
+    private func clearStaleCapture() {
+        _ = try? session.command(code: PTPOp.terminateOpenCapture)
+        _ = try? setPropRetryingBusy(FujiProp.priorityMode, 1)
+    }
+
+    /// Applies live view quality without blocking on the acknowledgement.
+    ///
+    /// The X-T3 accepts this write but routinely never sends its response container.
+    /// Waiting the full read timeout for one leaves the late reply to be picked up by
+    /// the next command, which misaligns every transaction after it and wedges the
+    /// camera until it is power cycled. Issuing the write and absorbing a late reply
+    /// keeps the setting working on bodies that do answer, without stalling the ones
+    /// that don't.
+    private func writeLiveViewQuality(_ quality: FujiLiveViewQuality) {
+        do {
+            let rc = try session.setPropU16(FujiProp.liveViewQuality, quality.rawValue,
+                                            timeout: Self.propertyAckTimeout)
+            if rc != PTPRC.ok {
+                EngineLog.add(String(format: "live view quality write rc 0x%04X", rc))
+            }
+        } catch {
+            session.drain(timeout: Self.propertyDrainTimeout)
+            EngineLog.add("live view quality write not acknowledged, continuing")
         }
     }
 
@@ -74,14 +119,30 @@ public final class FujiCamera {
         if info.responseCode == PTPRC.invalidObjectHandle { return nil }
 
         let object = try session.command(code: PTPOp.getObject, params: [Self.liveViewHandle])
-        defer {
-            _ = try? session.command(code: PTPOp.deleteObject, params: [Self.liveViewHandle, 0])
-        }
+        defer { releaseLiveViewFrame() }
         guard object.responseCode == PTPRC.ok,
               let jpeg = object.data,
               jpeg.count > 3, jpeg[jpeg.startIndex] == 0xFF, jpeg[jpeg.startIndex + 1] == 0xD8
         else { return nil }
         return jpeg
+    }
+
+    /// Releases the live view object so the camera renders the next frame.
+    ///
+    /// The delete cannot be skipped: it is what advances the live view buffer, and
+    /// without it the camera keeps handing back the same JPEG forever. But some
+    /// bodies (confirmed on the X-T3) routinely fail to answer it, and waiting for
+    /// the response costs a full read timeout per frame - which is the difference
+    /// between ~0 fps and ~30 fps. So issue it, give the camera a brief moment, and
+    /// absorb a late reply rather than blocking on one.
+    private func releaseLiveViewFrame() {
+        do {
+            _ = try session.command(code: PTPOp.deleteObject,
+                                    params: [Self.liveViewHandle, 0],
+                                    timeout: Self.deleteAckTimeout)
+        } catch {
+            session.drain(timeout: Self.deleteDrainTimeout)
+        }
     }
 
     public func stopLiveView() throws {
