@@ -65,6 +65,21 @@ final class AppState: ObservableObject {
         }
     }
     @Published var cameraProperties: [CameraProperty] = []
+    @Published var releaseState: ReleaseState = .idle
+    @Published var focusState: FocusState = .idle
+    @Published var exposureLocked = false
+
+    enum FocusState: Equatable {
+        case idle
+        case focusing
+        case done(Bool)
+    }
+
+    enum ReleaseState: Equatable {
+        case idle
+        case working
+        case done(Bool)
+    }
     @Published var previewImage: CGImage?
 
     private let installer = ExtensionInstaller()
@@ -97,6 +112,17 @@ final class AppState: ObservableObject {
         }
         streamer.onPreviewFrame = { [weak self] image in
             self?.previewImage = image
+        }
+        streamer.onExposureLockChanged = { [weak self] locked in
+            self?.exposureLocked = locked
+        }
+        streamer.onAutofocusResult = { [weak self] locked in
+            guard let self else { return }
+            self.focusState = .done(locked)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, case .done = self.focusState else { return }
+                self.focusState = .idle
+            }
         }
         streamer.setOrientation(mirrored: mirrored, rotation: rotation)
         applyFraming()
@@ -184,6 +210,30 @@ final class AppState: ObservableObject {
     func startStreaming() {
         UserDefaults.standard.set(true, forKey: "autoStart")
         streamer.start(size: liveViewSize, quality: liveViewQuality)
+    }
+
+    func toggleExposureLock() {
+        guard isStreaming else { return }
+        streamer.setAutoExposureLock(!exposureLocked)
+    }
+
+    func triggerAutofocus() {
+        guard isStreaming else { return }
+        focusState = .focusing
+        streamer.triggerAutofocus()
+    }
+
+    func releaseCamera() {
+        UserDefaults.standard.set(false, forKey: "autoStart")
+        releaseState = .working
+        streamer.releaseCamera { [weak self] restored in
+            guard let self else { return }
+            self.releaseState = .done(restored)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+                guard let self, case .done = self.releaseState else { return }
+                self.releaseState = .idle
+            }
+        }
     }
 
     func stopStreaming() {

@@ -13,6 +13,7 @@ public enum PTPOp {
     public static let setDevicePropValue: UInt16 = 0x1016
     public static let terminateOpenCapture: UInt16 = 0x1018
     public static let initiateOpenCapture: UInt16 = 0x101C
+    public static let initiateCapture: UInt16 = 0x100E
 }
 
 public enum PTPRC {
